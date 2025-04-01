@@ -20,10 +20,8 @@ echo "// --> https://senicity.com "
 echo "// -- "
 echo ""
 echo "------------"
-echo "Welcome to the MixQL Service"
-echo "Type your SQL query (type 'exit' to quit):"
+echo "This is the MixQL Command Line Interface for making queries to the server."
 echo "------------"
-echo ""
 
 # Defaults
 HOST="localhost"
@@ -38,8 +36,12 @@ while getopts "h:p:" opt; do
   esac
 done
 
+echo "------------"
 echo "Running on: $HOST:$PORT"
-echo "-------------"
+echo "------------"
+echo "------------"
+echo "Type your MixQL query (type 'exit' to quit):"
+echo "------------"
 echo ""
 
 while true; do
