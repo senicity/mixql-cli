@@ -127,10 +127,16 @@ echo -e "${PURPLE}${BOLD}──────────────────�
 echo -e "${CYAN}Type MixQL queries below (type 'exit' to quit, 'help' for help)${NC}"
 echo ""
 
+# Initialize history file
+HISTORY_FILE="$HOME/.mixql_history"
+touch "$HISTORY_FILE"
+
 while true; do
-    # Prompt for SQL input
+    # Prompt for SQL input with readline support
     echo -ne "${GREEN}${BOLD}mixql${NC}${CYAN}${BOLD} ❯ ${NC}"
-    read QUERY
+    read -e QUERY
+    # Save to history
+    echo "$QUERY" >> "$HISTORY_FILE"
     
     # Exit condition
     if [[ "$QUERY" == "exit" ]]; then
@@ -186,7 +192,8 @@ while true; do
         exit_code=$?
         stop_loading
         
-        if [ $exit_code -eq 0 ]; then
+        # Check if we got a response (not empty) instead of just nc exit code
+        if [ -n "$response" ]; then
             echo -ne "\b${GREEN}✓${NC}"
         elif [ $exit_code -eq 124 ]; then
             echo -ne "\b${RED}✗${NC}"
@@ -201,7 +208,8 @@ while true; do
         # Fallback without timeout
         response=$(echo "$QUERY" | nc $HOST $PORT 2>/dev/null)
         stop_loading
-        if [ $? -eq 0 ]; then
+        # Check if we got a response (not empty) instead of just nc exit code
+        if [ -n "$response" ]; then
             echo -ne "\b${GREEN}✓${NC}"
         else
             echo -ne "\b${RED}✗${NC}"
