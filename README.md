@@ -35,3 +35,22 @@ To change defaults on runtime, simply add the following to your command line whe
 ```bash
 bash mixql.sh -h mixql.demo.senicity.com -p 9797
 ```
+
+### Agent Integration
+The MixQL CLI provides an interactive REPL interface that can be used by AI agents and automated systems. For detailed information on agent usage patterns, best practices, and examples, see [AGENTS.md](AGENTS.md).
+
+Key features for agents:
+- **Parameterized queries**: Support for placeholders like `:param_name`
+- **REPL interface**: Interactive `mixql>` prompt
+- **Error handling**: Color-coded success/error responses
+- **Interactive usage**: Designed for manual or agent-driven interaction
+
+#### Interactive Agent Usage
+```bash
+# Start the interactive CLI
+bash mixql.sh
+
+# Then type queries at the mixql> prompt:
+# mixql> SELECT SHA1(:input) AS hash
+# Enter value for "input": hello
+```
