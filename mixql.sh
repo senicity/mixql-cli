@@ -127,10 +127,17 @@ echo -e "${PURPLE}${BOLD}──────────────────�
 echo -e "${CYAN}Type MixQL queries below (type 'exit' to quit, 'help' for help)${NC}"
 echo ""
 
+# Initialize history file
+HISTORY_FILE="$HOME/.mixql_history"
+touch "$HISTORY_FILE"
+
 while true; do
-    # Prompt for SQL input
-    echo -ne "${GREEN}${BOLD}mixql${NC}${CYAN}${BOLD} ❯ ${NC}"
-    read QUERY
+    # Prompt for SQL input with readline support
+    # Build prompt with $'...' syntax for escape codes
+    PROMPT=$'\033[0;32m\033[1mmixql\033[0m\033[0;36m\033[1m ❯ \033[0m'
+    read -e -p "$PROMPT" QUERY
+    # Save to history
+    echo "$QUERY" >> "$HISTORY_FILE"
     
     # Exit condition
     if [[ "$QUERY" == "exit" ]]; then
@@ -148,7 +155,11 @@ while true; do
         echo -e "${CYAN}CREATE UUID${NC}            - Generate UUID"
         echo -e "${CYAN}CREATE SALT${NC}            - Generate cryptographic salt"
         echo -e "${CYAN}CREATE KEY${NC}             - Generate encryption key"
-        echo -e "${CYAN}STORE ...${NC}              - Store/retrieve queries"
+        echo -e "${CYAN}SELECT ... STORE AS name${NC} - Store query for reuse"
+        echo -e "${CYAN}STORE LIST${NC}             - List stored queries"
+        echo -e "${CYAN}STORE SELECT name${NC}      - View stored query"
+        echo -e "${CYAN}STORE USE name${NC}         - Execute stored query"
+        echo -e "${CYAN}STORE DELETE name${NC}      - Delete stored query"
         echo -e "${CYAN}exit${NC}                   - Exit the CLI"
         echo -e "${CYAN}help, ?${NC}                - Show this help"
         echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
@@ -161,19 +172,83 @@ while true; do
         continue
     fi
 
-    # Find all placeholders (e.g., :param)
-    PLACEHOLDERS=($(grep -oE ":\w+" <<< "$QUERY" | sort -u))
+    # Find all placeholders (e.g., :param) - preserve order, keep unique
+    PLACEHOLDERS=()
+    while read -r placeholder; do
+        if [[ ! " ${PLACEHOLDERS[@]} " =~ " ${placeholder} " ]]; then
+            PLACEHOLDERS+=("$placeholder")
+        fi
+    done < <(grep -oE ":\w+" <<< "$QUERY")
+    PARAM_VALUES=()
 
-    # If placeholders exist, prompt the user for each value
-    if [ ${#PLACEHOLDERS[@]} -gt 0 ]; then
+    # Check if this is any STORE command variant
+    # STORE commands should not prompt for parameter values
+    # Note: STORE USE is handled separately as it executes stored queries
+    IS_STORE_COMMAND=0
+    if [[ "$QUERY" =~ STORE[[:space:]]+(AS|LIST|SELECT|DELETE) ]] || [[ "$QUERY" =~ ^STORE[[:space:]]+(LIST|SELECT|DELETE) ]]; then
+        IS_STORE_COMMAND=1
+    fi
+
+    # Special handling for STORE USE - stored queries may need parameters
+    IS_STORE_USE=0
+    if [[ "$QUERY" =~ ^STORE[[:space:]]+USE[[:space:]]+ ]]; then
+        IS_STORE_USE=1
+    fi
+
+    # If placeholders exist and it's not a STORE command, prompt the user for each value
+    if [ ${#PLACEHOLDERS[@]} -gt 0 ] && [ $IS_STORE_COMMAND -eq 0 ]; then
         echo -e "${PURPLE}${BOLD}┌─[PARAMETERS]${NC}"
         for placeholder in "${PLACEHOLDERS[@]}"; do
             clean_placeholder="${placeholder#:}"
             echo -ne "${PURPLE}${BOLD}│ ${NC}${CYAN}Enter value for \"$clean_placeholder\": ${NC}"
             read value
-            QUERY="${QUERY//${placeholder}/$value}"
+            PARAM_VALUES+=("$value")
         done
         echo -e "${PURPLE}${BOLD}└────────────────${NC}"
+    fi
+
+    # STORE USE command - get stored query first, then prompt for its parameters
+    if [ $IS_STORE_USE -eq 1 ]; then
+        # Extract store name from STORE USE <name>
+        STORE_NAME=$(echo "$QUERY" | awk '{print $3}')
+        
+        if [ -n "$STORE_NAME" ]; then
+            # First, get the stored query definition
+            echo -e "${PURPLE}${BOLD}┌─[GETTING STORED QUERY]${NC}"
+            echo -ne "${PURPLE}${BOLD}│ ${NC}${CYAN}Fetching stored query '$STORE_NAME'...${NC}"
+            
+            # Send STORE SELECT <name> to get the query (NO trailing newline based on your example)
+            stored_query_response=$(echo -e "STORE SELECT $STORE_NAME" | nc $HOST $PORT 2>/dev/null)
+            stored_query_response=$(echo "$stored_query_response" | sed 's/[[:space:]]*$//')
+            
+            if [ -n "$stored_query_response" ] && [[ ! "$stored_query_response" == *"ERROR"* ]] && [[ ! "$stored_query_response" == *"not found"* ]] && [[ ! "$stored_query_response" == *"Query not found"* ]]; then
+                echo -e "\b${GREEN}✓${NC}"
+                
+                # Extract parameters from the stored query - preserve order, keep unique
+                STORED_PLACEHOLDERS=()
+                while read -r placeholder; do
+                    if [[ ! " ${STORED_PLACEHOLDERS[@]} " =~ " ${placeholder} " ]]; then
+                        STORED_PLACEHOLDERS+=("$placeholder")
+                    fi
+                done < <(grep -oE ":\w+" <<< "$stored_query_response")
+                
+                if [ ${#STORED_PLACEHOLDERS[@]} -gt 0 ]; then
+                    echo -e "\n${PURPLE}${BOLD}┌─[PARAMETERS FOR STORED QUERY]${NC}"
+                    for placeholder in "${STORED_PLACEHOLDERS[@]}"; do
+                        clean_placeholder="${placeholder#:}"
+                        echo -ne "${PURPLE}${BOLD}│ ${NC}${CYAN}Enter value for \"$clean_placeholder\": ${NC}"
+                        read value
+                        PARAM_VALUES+=("$value")
+                    done
+                    echo -e "${PURPLE}${BOLD}└────────────────${NC}"
+                fi
+            else
+                echo -e "\b${RED}✗${NC}"
+                echo -e "${PURPLE}${BOLD}│ ${NC}${RED}Could not retrieve stored query${NC}"
+                echo -e "${PURPLE}${BOLD}└────────────────${NC}"
+                # Still continue to try STORE USE
+            fi
+        fi
     fi
 
     # Send the query to the MixQL service via TCP and get the response with timeout
@@ -181,12 +256,24 @@ while true; do
     echo -ne "${GREEN}${BOLD}│ ${NC}${CYAN}Executing query...${NC}"
     start_loading
     
+    # Build the multi-line input: query + parameters on separate lines
+    if [ ${#PARAM_VALUES[@]} -gt 0 ]; then
+        # Build the input with query first, then each parameter on new line
+        INPUT="$QUERY"
+        for param_value in "${PARAM_VALUES[@]}"; do
+            INPUT="$INPUT\n$param_value"
+        done
+    else
+        INPUT="$QUERY"
+    fi
+    
     if command -v timeout &> /dev/null; then
-        response=$(echo "$QUERY" | timeout 5 nc $HOST $PORT 2>/dev/null)
+        response=$(echo -e "$INPUT" | timeout 5 nc $HOST $PORT 2>/dev/null)
         exit_code=$?
         stop_loading
         
-        if [ $exit_code -eq 0 ]; then
+        # Check if we got a response (not empty) instead of just nc exit code
+        if [ -n "$response" ]; then
             echo -ne "\b${GREEN}✓${NC}"
         elif [ $exit_code -eq 124 ]; then
             echo -ne "\b${RED}✗${NC}"
@@ -199,9 +286,10 @@ while true; do
         fi
     else
         # Fallback without timeout
-        response=$(echo "$QUERY" | nc $HOST $PORT 2>/dev/null)
+        response=$(echo -e "$INPUT" | nc $HOST $PORT 2>/dev/null)
         stop_loading
-        if [ $? -eq 0 ]; then
+        # Check if we got a response (not empty) instead of just nc exit code
+        if [ -n "$response" ]; then
             echo -ne "\b${GREEN}✓${NC}"
         else
             echo -ne "\b${RED}✗${NC}"
