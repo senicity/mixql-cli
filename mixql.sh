@@ -81,6 +81,10 @@ echo ""
 HOST="localhost"
 PORT="7272"
 
+# Authentication state
+AUTH_REQUIRED=0
+AUTH_CREDENTIALS=""
+
 # Check if netcat is available
 if ! command -v nc &> /dev/null; then
     echo -e "\033[31m❌ netcat (nc) is not installed\033[0m"
@@ -119,6 +123,113 @@ else
     echo -e "${YELLOW}Please ensure the MixQL server is running.${NC}"
     echo ""
     exit 1
+fi
+
+# Check if authentication is required
+echo -ne "${CYAN}Checking authentication requirements...${NC}"
+start_loading
+
+# Use nc with a small timeout and capture output
+# Use a temporary file to capture response
+temp_file=$(mktemp)
+(echo -e "CREATE UUID\n" | nc -w 2 "$HOST" "$PORT" 2>/dev/null | head -c 100) > "$temp_file" 2>/dev/null &
+nc_pid=$!
+sleep 0.1
+kill $nc_pid 2>/dev/null
+wait $nc_pid 2>/dev/null
+
+test_response=$(cat "$temp_file" 2>/dev/null)
+rm -f "$temp_file"
+stop_loading
+
+# Check if we got AUTH_FAILED response
+if [[ "$test_response" == *"AUTH_FAILED"* ]]; then
+    # Authentication is required
+    echo -ne "\b${YELLOW}⚠${NC}"
+    echo -e "\n${YELLOW}${BOLD}⚠ Authentication required${NC}"
+    AUTH_REQUIRED=1
+elif [[ -n "$test_response" ]]; then
+    # Got a valid response, no auth required
+    echo -ne "\b${GREEN}✓${NC}"
+    echo -e "\n${GREEN}${BOLD}✓ No authentication required${NC}"
+    AUTH_REQUIRED=0
+else
+    # No response or timeout - could not determine
+    echo -ne "\b${YELLOW}?${NC}"
+    echo -e "\n${YELLOW}${BOLD}? Could not determine auth status${NC}"
+    
+    # Ask user if they want to try with auth
+    echo -ne "${CYAN}Do you want to try with authentication? (y/n): ${NC}"
+    read -r try_auth
+    if [[ "$try_auth" == "y" || "$try_auth" == "Y" ]]; then
+        AUTH_REQUIRED=1
+    else
+        AUTH_REQUIRED=0
+    fi
+fi
+echo ""
+
+# Prompt for credentials if authentication is required
+if [ $AUTH_REQUIRED -eq 1 ]; then
+    echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${WHITE}${BOLD}                    AUTHENTICATION${NC}"
+    echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
+    
+    # Get username
+    echo -ne "${CYAN}Enter username: ${NC}"
+    read -r username
+    
+    # Get password with star display
+    echo -ne "${CYAN}Enter password: ${NC}"
+    password=""
+    while IFS= read -r -s -n1 char; do
+        # Break on Enter (empty char)
+        if [[ -z $char ]]; then
+            echo
+            break
+        fi
+        # Handle backspace
+        if [[ $char == $'\x7f' ]]; then
+            if [[ -n $password ]]; then
+                password=${password%?}
+                echo -ne "\b \b"
+            fi
+        else
+            password+="$char"
+            echo -ne "*"
+        fi
+    done
+    
+    # Store credentials in session memory
+    AUTH_CREDENTIALS="$username:$password"
+    
+    # Test authentication
+    echo -ne "${CYAN}Testing authentication...${NC}"
+    start_loading
+    
+    # Use nc with proper handling
+    temp_file=$(mktemp)
+    (echo -e "AUTH $AUTH_CREDENTIALS\nCREATE UUID\n" | nc -w 2 "$HOST" "$PORT" 2>/dev/null | head -c 100) > "$temp_file" 2>/dev/null &
+    nc_pid=$!
+    sleep 0.1
+    kill $nc_pid 2>/dev/null
+    wait $nc_pid 2>/dev/null
+    
+    auth_test_response=$(cat "$temp_file" 2>/dev/null)
+    rm -f "$temp_file"
+    stop_loading
+    
+    if [[ "$auth_test_response" == *"AUTH_FAILED"* ]] || [[ -z "$auth_test_response" ]]; then
+        echo -ne "\b${RED}✗${NC}"
+        echo -e "\n${RED}${BOLD}✗ Authentication failed${NC}"
+        echo -e "${YELLOW}Please check your credentials and try again.${NC}"
+        echo ""
+        exit 1
+    else
+        echo -ne "\b${GREEN}✓${NC}"
+        echo -e "\n${GREEN}${BOLD}✓ Authentication successful${NC}"
+        echo ""
+    fi
 fi
 
 echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
@@ -218,7 +329,13 @@ while true; do
             echo -ne "${PURPLE}${BOLD}│ ${NC}${CYAN}Fetching stored query '$STORE_NAME'...${NC}"
             
             # Send STORE SELECT <name> to get the query (NO trailing newline based on your example)
-            stored_query_response=$(echo -e "STORE SELECT $STORE_NAME" | nc $HOST $PORT 2>/dev/null)
+            # Prepend AUTH command if authentication is required
+            store_select_input="STORE SELECT $STORE_NAME"
+            if [ $AUTH_REQUIRED -eq 1 ] && [ -n "$AUTH_CREDENTIALS" ]; then
+                store_select_input="AUTH $AUTH_CREDENTIALS\n$store_select_input"
+            fi
+            
+            stored_query_response=$(echo -e "$store_select_input" | nc $HOST $PORT 2>/dev/null)
             stored_query_response=$(echo "$stored_query_response" | sed 's/[[:space:]]*$//')
             
             if [ -n "$stored_query_response" ] && [[ ! "$stored_query_response" == *"ERROR"* ]] && [[ ! "$stored_query_response" == *"not found"* ]] && [[ ! "$stored_query_response" == *"Query not found"* ]]; then
@@ -265,6 +382,11 @@ while true; do
         done
     else
         INPUT="$QUERY"
+    fi
+    
+    # Prepend AUTH command if authentication is required
+    if [ $AUTH_REQUIRED -eq 1 ] && [ -n "$AUTH_CREDENTIALS" ]; then
+        INPUT="AUTH $AUTH_CREDENTIALS\n$INPUT"
     fi
     
     if command -v timeout &> /dev/null; then
