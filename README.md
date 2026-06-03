@@ -51,8 +51,38 @@ Key features for agents:
 bash mixql.sh
 
 # Then type queries at the mixql> prompt:
+
+# --- Hashing ---
+
+# SHA-256 hash (recommended):
+# mixql> SELECT SHA256(:input) AS hash
+# Enter value for "input": hello
+
+# SHA-512 hash:
+# mixql> SELECT SHA512(:input) AS hash
+# Enter value for "input": hello
+
+# SHA-1 hash (legacy):
 # mixql> SELECT SHA1(:input) AS hash
 # Enter value for "input": hello
+
+# HMAC-SHA256 keyed hash:
+# mixql> SELECT HMAC(:key, :msg) AS hash
+# Enter value for "key": mysecretkey
+# Enter value for "msg": hello
+
+# --- Password Hashing (Argon2) ---
+
+# Argon2id password hash:
+# mixql> SELECT ARGON2(:password) AS hash
+# Enter value for "password": mypassword123
+
+# Verify password against Argon2 hash:
+# mixql> SELECT ARGON2_VERIFY(:hash, :password) AS hash
+# Enter value for "hash": <stored_argon2_hash>
+# Enter value for "password": mypassword123
+
+# --- Encryption (AES-256-CBC) ---
 
 # Encrypt a value:
 # mixql> SELECT ENC(:input) AS hash
@@ -84,6 +114,28 @@ bash mixql.sh
 
 # Full: KEY + SALT + PEPPER:
 # mixql> SELECT ENC(:msg) KEY :key SALT :s1 PEPPER :p1,:p2 AS hash
+# Enter value for "msg": secret message
+# Enter value for "key": mykey
+# Enter value for "s1": layerkey
+# Enter value for "p1": foo
+# Enter value for "p2": bar
+
+# --- Encryption (AES-256-GCM - Authenticated, recommended) ---
+
+# GCM encrypt:
+# mixql> SELECT ENC_GCM(:input) AS hash
+# Enter value for "input": my secret data
+
+# GCM decrypt:
+# mixql> SELECT DEC_GCM(:input) AS hash
+# Enter value for "input": <encrypted_output>
+
+# GCM with custom key:
+# mixql> SELECT ENC_GCM(:input) KEY mysecretkey AS hash
+# Enter value for "input": my secret data
+
+# GCM full: KEY + SALT + PEPPER:
+# mixql> SELECT ENC_GCM(:msg) KEY :key SALT :s1 PEPPER :p1,:p2 AS hash
 # Enter value for "msg": secret message
 # Enter value for "key": mykey
 # Enter value for "s1": layerkey
