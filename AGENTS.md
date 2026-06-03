@@ -112,10 +112,14 @@ Enter value for "b": bar
 The MixQL CLI provides an interactive REPL interface that AI agents and automated systems can use for:
 
 1. **Data Security Operations**:
-   - Secure hashing (SHA-1, MD5)
+   - Secure hashing (SHA-256, SHA-512, SHA-1, MD5)
+   - HMAC-SHA256 keyed hashing
+   - Argon2id password hashing and verification
    - Base64 encoding
    - Cryptographic salt generation
    - Encryption key generation
+   - AES-256-CBC encryption/decryption (with KEY, SALT, PEPPER)
+   - AES-256-GCM authenticated encryption/decryption (recommended)
    - UUID generation
 
 2. **Interactive Usage**:
