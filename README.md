@@ -53,4 +53,40 @@ bash mixql.sh
 # Then type queries at the mixql> prompt:
 # mixql> SELECT SHA1(:input) AS hash
 # Enter value for "input": hello
+
+# Encrypt a value:
+# mixql> SELECT ENC(:input) AS hash
+# Enter value for "input": my secret data
+
+# Decrypt a value:
+# mixql> SELECT DEC(:input) AS hash
+# Enter value for "input": <encrypted_output>
+
+# Encrypt with a custom key:
+# mixql> SELECT ENC(:input) KEY mysecretkey123 AS hash
+# Enter value for "input": my secret data
+
+# Decrypt with a custom key:
+# mixql> SELECT DEC(:input) KEY mysecretkey123 AS hash
+# Enter value for "input": <encrypted_output>
+
+# Encrypt with PEPPER (interleaves between characters):
+# mixql> SELECT ENC(:input) PEPPER :p1,:p2 AS hash
+# Enter value for "input": hello
+# Enter value for "p1": abc
+# Enter value for "p2": xyz
+
+# Encrypt with SALT (layered encryption):
+# mixql> SELECT ENC(:input) SALT :s1,:s2 AS hash
+# Enter value for "input": hello
+# Enter value for "s1": saltkey1
+# Enter value for "s2": saltkey2
+
+# Full: KEY + SALT + PEPPER:
+# mixql> SELECT ENC(:msg) KEY :key SALT :s1 PEPPER :p1,:p2 AS hash
+# Enter value for "msg": secret message
+# Enter value for "key": mykey
+# Enter value for "s1": layerkey
+# Enter value for "p1": foo
+# Enter value for "p2": bar
 ```
