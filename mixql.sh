@@ -85,6 +85,9 @@ PORT="7272"
 AUTH_REQUIRED=0
 AUTH_CREDENTIALS=""
 
+# Restore terminal on exit/interrupt
+trap 'stty icanon echo </dev/tty 2>/dev/null' EXIT INT TERM
+
 # Check if netcat is available
 if ! command -v nc &> /dev/null; then
     echo -e "\033[31m❌ netcat (nc) is not installed\033[0m"
@@ -179,26 +182,10 @@ if [ $AUTH_REQUIRED -eq 1 ]; then
     echo -ne "${CYAN}Enter username: ${NC}"
     read -r username
     
-    # Get password with star display
+    # Get password (hidden input)
     echo -ne "${CYAN}Enter password: ${NC}"
-    password=""
-    while IFS= read -r -s -n1 char; do
-        # Break on Enter (empty char)
-        if [[ -z $char ]]; then
-            echo
-            break
-        fi
-        # Handle backspace
-        if [[ $char == $'\x7f' ]]; then
-            if [[ -n $password ]]; then
-                password=${password%?}
-                echo -ne "\b \b"
-            fi
-        else
-            password+="$char"
-            echo -ne "*"
-        fi
-    done
+    read -r -s password
+    echo
     
     # Store credentials in session memory
     AUTH_CREDENTIALS="$username:$password"
@@ -262,17 +249,48 @@ while true; do
         echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
         echo -e "${WHITE}${BOLD}                    AVAILABLE COMMANDS${NC}"
         echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
-        echo -e "${CYAN}SELECT ... AS hash${NC}     - Execute a hash query"
-        echo -e "${CYAN}CREATE UUID${NC}            - Generate UUID"
-        echo -e "${CYAN}CREATE SALT${NC}            - Generate cryptographic salt"
-        echo -e "${CYAN}CREATE KEY${NC}             - Generate encryption key"
-        echo -e "${CYAN}SELECT ... STORE AS name${NC} - Store query for reuse"
-        echo -e "${CYAN}STORE LIST${NC}             - List stored queries"
-        echo -e "${CYAN}STORE SELECT name${NC}      - View stored query"
-        echo -e "${CYAN}STORE USE name${NC}         - Execute stored query"
-        echo -e "${CYAN}STORE DELETE name${NC}      - Delete stored query"
-        echo -e "${CYAN}exit${NC}                   - Exit the CLI"
-        echo -e "${CYAN}help, ?${NC}                - Show this help"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Hashing & Encoding${NC}"
+        echo -e "${CYAN}  SELECT SHA1(:input) AS hash${NC}        - SHA-1 hash"
+        echo -e "${CYAN}  SELECT MD5(:input) AS hash${NC}         - MD5 hash"
+        echo -e "${CYAN}  SELECT BASE64_ENCODE(:input) AS hash${NC} - Base64 encode"
+        echo -e "${CYAN}  SELECT ... AS hash UPPERCASE${NC}       - Uppercase output"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Encryption (AES-256-CBC)${NC}"
+        echo -e "${CYAN}  SELECT ENC(:input) AS hash${NC}         - Encrypt (server key)"
+        echo -e "${CYAN}  SELECT ENC(:input) KEY mykey AS hash${NC} - Encrypt (custom key)"
+        echo -e "${CYAN}  SELECT ENC(:input) SALT :s1,:s2 AS hash${NC} - Layered encryption"
+        echo -e "${CYAN}  SELECT ENC(:input) PEPPER :p1,:p2 AS hash${NC} - Interleave peppers"
+        echo -e "${CYAN}  SELECT ENC(:input) KEY :k SALT :s PEPPER :p AS hash${NC} - Full"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Decryption (AES-256-CBC)${NC}"
+        echo -e "${CYAN}  SELECT DEC(:input) AS hash${NC}         - Decrypt (server key)"
+        echo -e "${CYAN}  SELECT DEC(:input) KEY mykey AS hash${NC} - Decrypt (custom key)"
+        echo -e "${CYAN}  SELECT DEC(:input) KEY :k SALT :s PEPPER :p AS hash${NC} - Full"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Generators${NC}"
+        echo -e "${CYAN}  CREATE UUID${NC}                        - Generate UUID"
+        echo -e "${CYAN}  CREATE SALT${NC}                        - Generate cryptographic salt"
+        echo -e "${CYAN}  CREATE SALT LIMIT 5 LENGTH 32${NC}      - Multiple salts"
+        echo -e "${CYAN}  CREATE SALT SHA${NC}                    - SHA-1 hashed salt"
+        echo -e "${CYAN}  CREATE KEY${NC}                         - Generate encryption key"
+        echo -e "${CYAN}  CREATE KEY LIMIT 5${NC}                 - Multiple keys"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Functions${NC}"
+        echo -e "${CYAN}  CONCAT(a, b, ...)${NC}                  - Concatenate values"
+        echo -e "${CYAN}  NOW()${NC}                              - Current Unix timestamp"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Storage${NC}"
+        echo -e "${CYAN}  SELECT ... STORE AS name${NC}           - Store query for reuse"
+        echo -e "${CYAN}  STORE LIST${NC}                         - List stored queries"
+        echo -e "${CYAN}  STORE SELECT name${NC}                  - View stored query"
+        echo -e "${CYAN}  STORE USE name${NC}                     - Execute stored query"
+        echo -e "${CYAN}  STORE DELETE name${NC}                  - Delete stored query"
+        echo ""
+        echo -e "${YELLOW}${BOLD}  CLI${NC}"
+        echo -e "${CYAN}  exit${NC}                               - Exit the CLI"
+        echo -e "${CYAN}  help, ?${NC}                            - Show this help"
+        echo ""
         echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
         echo ""
         continue
@@ -312,7 +330,42 @@ while true; do
         for placeholder in "${PLACEHOLDERS[@]}"; do
             clean_placeholder="${placeholder#:}"
             echo -ne "${PURPLE}${BOLD}│ ${NC}${CYAN}Enter value for \"$clean_placeholder\": ${NC}"
-            read value
+            # Use stty raw mode + perl to bypass terminal line buffer limit
+            # Strips line breaks and spaces from pasted text (concatenates into one continuous string)
+            stty -icanon min 1 time 0 -echo </dev/tty 2>/dev/null
+            value=$(perl -e '
+                use IO::Select;
+                open(my $tty, "<", "/dev/tty") or die;
+                my $buf = "";
+                my $sel = IO::Select->new($tty);
+                my $first_char = 1;
+                my $is_paste = 0;
+                while(sysread($tty, my $c, 1)) {
+                    if ($first_char) {
+                        $first_char = 0;
+                        $is_paste = $sel->can_read(0.01) ? 1 : 0;
+                    }
+                    if (!$is_paste && ($c eq "\n" || $c eq "\r")) {
+                        last;
+                    }
+                    if ($is_paste && ($c eq "\n" || $c eq "\r" || $c eq " ")) {
+                        last unless $sel->can_read(0.05);
+                        next;
+                    }
+                    if (ord($c) == 127 || ord($c) == 8) {
+                        if (length($buf) > 0) {
+                            $buf = substr($buf, 0, -1);
+                            print STDERR "\b \b";
+                        }
+                        next;
+                    }
+                    $buf .= $c;
+                    print STDERR $c;
+                }
+                print $buf;
+            ' 2>/dev/tty)
+            stty icanon echo </dev/tty 2>/dev/null
+            echo
             PARAM_VALUES+=("$value")
         done
         echo -e "${PURPLE}${BOLD}└────────────────${NC}"
@@ -354,7 +407,40 @@ while true; do
                     for placeholder in "${STORED_PLACEHOLDERS[@]}"; do
                         clean_placeholder="${placeholder#:}"
                         echo -ne "${PURPLE}${BOLD}│ ${NC}${CYAN}Enter value for \"$clean_placeholder\": ${NC}"
-                        read value
+                        stty -icanon min 1 time 0 -echo </dev/tty 2>/dev/null
+                        value=$(perl -e '
+                            use IO::Select;
+                            open(my $tty, "<", "/dev/tty") or die;
+                            my $buf = "";
+                            my $sel = IO::Select->new($tty);
+                            my $first_char = 1;
+                            my $is_paste = 0;
+                            while(sysread($tty, my $c, 1)) {
+                                if ($first_char) {
+                                    $first_char = 0;
+                                    $is_paste = $sel->can_read(0.01) ? 1 : 0;
+                                }
+                                if (!$is_paste && ($c eq "\n" || $c eq "\r")) {
+                                    last;
+                                }
+                                if ($is_paste && ($c eq "\n" || $c eq "\r" || $c eq " ")) {
+                                    last unless $sel->can_read(0.05);
+                                    next;
+                                }
+                                if (ord($c) == 127 || ord($c) == 8) {
+                                    if (length($buf) > 0) {
+                                        $buf = substr($buf, 0, -1);
+                                        print STDERR "\b \b";
+                                    }
+                                    next;
+                                }
+                                $buf .= $c;
+                                print STDERR $c;
+                            }
+                            print $buf;
+                        ' 2>/dev/tty)
+                        stty icanon echo </dev/tty 2>/dev/null
+                        echo
                         PARAM_VALUES+=("$value")
                     done
                     echo -e "${PURPLE}${BOLD}└────────────────${NC}"
