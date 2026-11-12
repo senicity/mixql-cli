@@ -80,6 +80,61 @@ echo ""
 # Defaults
 HOST="localhost"
 PORT="7272"
+TLS_ENABLED=0
+TLS_OPTION_SET=0
+
+usage() {
+    echo "Usage: $0 [-h host] [-p port] [-t|--tls]"
+    echo ""
+    echo "Options:"
+    echo "  -h, --host HOST   MixQL hostname (default: localhost)"
+    echo "  -p, --port PORT   MixQL port (default: 7272)"
+    echo "  -t, --tls         Use TLS when connecting to MixQL"
+    echo "      --no-tls      Use plain TCP (default)"
+    echo ""
+    echo "TLS mode uses ncat when available, or openssl as a fallback."
+}
+
+# Parse command-line options. Plain TCP remains the default behavior.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--host)
+            if [[ -z "${2:-}" ]]; then
+                echo "Missing value for $1" >&2
+                usage >&2
+                exit 2
+            fi
+            HOST="$2"
+            shift 2
+            ;;
+        -p|--port)
+            if [[ -z "${2:-}" ]]; then
+                echo "Missing value for $1" >&2
+                usage >&2
+                exit 2
+            fi
+            PORT="$2"
+            shift 2
+            ;;
+        -t|--tls)
+            TLS_ENABLED=1
+            shift
+            ;;
+        --no-tls)
+            TLS_ENABLED=0
+            shift
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
 
 # Authentication state
 AUTH_REQUIRED=0
@@ -88,25 +143,101 @@ AUTH_CREDENTIALS=""
 # Restore terminal on exit/interrupt
 trap 'stty icanon echo </dev/tty 2>/dev/null' EXIT INT TERM
 
-# Check if netcat is available
-if ! command -v nc &> /dev/null; then
-    echo -e "\033[31m❌ netcat (nc) is not installed\033[0m"
-    echo "Please install netcat to use the MixQL CLI."
-    exit 1
+# Select the transport without changing the existing plain-TCP path.
+if [ "$TLS_ENABLED" -eq 1 ]; then
+    if command -v ncat &> /dev/null; then
+        TLS_BACKEND="ncat"
+        MIXQL_NETCAT=(ncat --ssl --ssl-verify --ssl-servername "$HOST")
+        TRANSPORT="TLS via ncat --ssl (certificate verification enabled)"
+    elif command -v openssl &> /dev/null; then
+        TLS_BACKEND="openssl"
+        MIXQL_NETCAT=(
+            openssl s_client
+            -quiet
+            -verify_return_error
+            -verify_hostname "$HOST"
+            -servername "$HOST"
+            -connect "$HOST:$PORT"
+        )
+        MIXQL_TLS_CHECK=(
+            openssl s_client
+            -brief
+            -verify_return_error
+            -verify_hostname "$HOST"
+            -servername "$HOST"
+            -connect "$HOST:$PORT"
+        )
+        TRANSPORT="TLS via openssl s_client (certificate verification enabled)"
+    else
+        echo -e "${RED}❌ TLS mode requires ncat or openssl, but neither is available.${NC}"
+        echo "Install ncat (usually included with the nmap package), install openssl, or omit --tls."
+        exit 1
+    fi
+else
+    if ! command -v nc &> /dev/null; then
+        echo -e "${RED}❌ netcat (nc) is not installed.${NC}"
+        echo "Please install netcat to use the MixQL CLI."
+        exit 1
+    fi
+    TLS_BACKEND="plain"
+    MIXQL_NETCAT=(nc)
+    TRANSPORT="plain TCP via nc"
 fi
 
-while getopts "h:p:" opt; do
-  case "$opt" in
-    h) HOST="$OPTARG" ;;
-    p) PORT="$OPTARG" ;;
-    \?) echo "Usage: $0 [-h host] [-p port]"
-        exit 1 ;;
-  esac
-done
+# Keep the command shape compatible with both netcat and openssl.
+if [ "$TLS_BACKEND" = "openssl" ]; then
+    MIXQL_PROBE=("${MIXQL_NETCAT[@]}")
+    MIXQL_QUERY=("${MIXQL_NETCAT[@]}")
+else
+    MIXQL_PROBE=("${MIXQL_NETCAT[@]}" -w 2 "$HOST" "$PORT")
+    MIXQL_QUERY=("${MIXQL_NETCAT[@]}" "$HOST" "$PORT")
+fi
+
+# Send a short startup probe and wait for a response. The fallback keeps
+# working on macOS systems that do not provide the timeout command.
+probe_mixql() {
+    local payload="$1"
+    local probe_file
+    local probe_pid
+
+    if command -v timeout &> /dev/null; then
+        printf '%b' "$payload" |
+            timeout 5 "${MIXQL_PROBE[@]}" 2>/dev/null |
+            head -c 100
+        return
+    fi
+
+    probe_file=$(mktemp)
+    (
+        printf '%b' "$payload" |
+            "${MIXQL_PROBE[@]}" 2>/dev/null |
+            head -c 100
+    ) > "$probe_file" 2>/dev/null &
+    probe_pid=$!
+
+    # Allow time for a remote TLS handshake before stopping the probe.
+    for _ in {1..20}; do
+        if [ -s "$probe_file" ]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    kill "$probe_pid" 2>/dev/null
+    wait "$probe_pid" 2>/dev/null
+    cat "$probe_file" 2>/dev/null
+    rm -f "$probe_file"
+}
 
 echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
 echo -e "${WHITE}${BOLD}                    CONNECTION STATUS${NC}"
 echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
+echo ""
+
+# Show the selected endpoint and transport before testing the connection.
+echo -e "${CYAN}Host:${NC} $HOST"
+echo -e "${CYAN}Port:${NC} $PORT"
+echo -e "${CYAN}Transport:${NC} $TRANSPORT"
 echo ""
 
 # Show connection test
@@ -114,7 +245,22 @@ echo -ne "${CYAN}Testing connection to ${WHITE}$HOST:$PORT${CYAN}...${NC}"
 start_loading
 
 # Test connection before entering REPL loop
-if nc -z "$HOST" "$PORT" 2>/dev/null; then
+if [ "$TLS_BACKEND" = "openssl" ]; then
+    # Complete a TLS handshake without consuming the CLI's stdin.
+    if "${MIXQL_TLS_CHECK[@]}" </dev/null >/dev/null 2>/dev/null; then
+        stop_loading
+        echo -ne "\b${GREEN}✓${NC}"
+        echo -e "\n${GREEN}${BOLD}✓ Connected to: $HOST:$PORT${NC}"
+        echo ""
+    else
+        stop_loading
+        echo -ne "\b${RED}✗${NC}"
+        echo -e "\n${RED}${BOLD}✗ Connection failed: $HOST:$PORT${NC}"
+        echo -e "${YELLOW}Please ensure the MixQL server is running.${NC}"
+        echo ""
+        exit 1
+    fi
+elif "${MIXQL_NETCAT[@]}" -z "$HOST" "$PORT" 2>/dev/null; then
     stop_loading
     echo -ne "\b${GREEN}✓${NC}"
     echo -e "\n${GREEN}${BOLD}✓ Connected to: $HOST:$PORT${NC}"
@@ -132,17 +278,7 @@ fi
 echo -ne "${CYAN}Checking authentication requirements...${NC}"
 start_loading
 
-# Use nc with a small timeout and capture output
-# Use a temporary file to capture response
-temp_file=$(mktemp)
-(echo -e "CREATE UUID\n" | nc -w 2 "$HOST" "$PORT" 2>/dev/null | head -c 100) > "$temp_file" 2>/dev/null &
-nc_pid=$!
-sleep 0.1
-kill $nc_pid 2>/dev/null
-wait $nc_pid 2>/dev/null
-
-test_response=$(cat "$temp_file" 2>/dev/null)
-rm -f "$temp_file"
+test_response=$(probe_mixql "CREATE UUID\\n")
 stop_loading
 
 # Check if we got AUTH_FAILED response
@@ -194,16 +330,7 @@ if [ $AUTH_REQUIRED -eq 1 ]; then
     echo -ne "${CYAN}Testing authentication...${NC}"
     start_loading
     
-    # Use nc with proper handling
-    temp_file=$(mktemp)
-    (echo -e "AUTH $AUTH_CREDENTIALS\nCREATE UUID\n" | nc -w 2 "$HOST" "$PORT" 2>/dev/null | head -c 100) > "$temp_file" 2>/dev/null &
-    nc_pid=$!
-    sleep 0.1
-    kill $nc_pid 2>/dev/null
-    wait $nc_pid 2>/dev/null
-    
-    auth_test_response=$(cat "$temp_file" 2>/dev/null)
-    rm -f "$temp_file"
+    auth_test_response=$(probe_mixql "AUTH $AUTH_CREDENTIALS\\nCREATE UUID\\n")
     stop_loading
     
     if [[ "$auth_test_response" == *"AUTH_FAILED"* ]] || [[ -z "$auth_test_response" ]]; then
@@ -307,6 +434,7 @@ while true; do
         echo -e "${YELLOW}${BOLD}  CLI${NC}"
         echo -e "${CYAN}  exit${NC}                               - Exit the CLI"
         echo -e "${CYAN}  help, ?${NC}                            - Show this help"
+        echo -e "${CYAN}  Startup: -t, --tls${NC}                 - Use TLS with ncat or openssl"
         echo ""
         echo -e "${PURPLE}${BOLD}────────────────────────────────────────────────────────────────${NC}"
         echo ""
@@ -405,7 +533,7 @@ while true; do
                 store_select_input="AUTH $AUTH_CREDENTIALS\n$store_select_input"
             fi
             
-            stored_query_response=$(echo -e "$store_select_input" | nc $HOST $PORT 2>/dev/null)
+            stored_query_response=$(echo -e "$store_select_input" | "${MIXQL_QUERY[@]}" 2>/dev/null)
             stored_query_response=$(echo "$stored_query_response" | sed 's/[[:space:]]*$//')
             
             if [ -n "$stored_query_response" ] && [[ ! "$stored_query_response" == *"ERROR"* ]] && [[ ! "$stored_query_response" == *"not found"* ]] && [[ ! "$stored_query_response" == *"Query not found"* ]]; then
@@ -493,7 +621,7 @@ while true; do
     fi
     
     if command -v timeout &> /dev/null; then
-        response=$(echo -e "$INPUT" | timeout 5 nc $HOST $PORT 2>/dev/null)
+        response=$(echo -e "$INPUT" | timeout 5 "${MIXQL_QUERY[@]}" 2>/dev/null)
         exit_code=$?
         stop_loading
         
@@ -511,7 +639,7 @@ while true; do
         fi
     else
         # Fallback without timeout
-        response=$(echo -e "$INPUT" | nc $HOST $PORT 2>/dev/null)
+        response=$(echo -e "$INPUT" | "${MIXQL_QUERY[@]}" 2>/dev/null)
         stop_loading
         # Check if we got a response (not empty) instead of just nc exit code
         if [ -n "$response" ]; then

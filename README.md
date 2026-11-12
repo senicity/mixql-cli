@@ -30,11 +30,25 @@ bash mixql.sh
 By default, the CLI uses host ```localhost``` and port ```7272``` which are the official MixQL default options.
 
 #### Changing defaults
-To change defaults on runtime, simply add the following to your command line when running MixQL, use ```-h``` followed by the hostname of your choice to change the host and ```-p``` to change the port that the CLI will attempt to connect to. 
+To change defaults on runtime, add `-h` for the hostname and `-p` for the port:
 
 ```bash
-bash mixql.sh -h mixql.demo.senicity.com -p 9797
+bash mixql.sh -h mixq.unified.oauth.senicity.com -p 7272
 ```
+
+#### TLS connections
+Plain TCP remains the default. To connect to a TLS-enabled NGINX stream endpoint, pass `-t` or `--tls`:
+
+```bash
+bash mixql.sh \
+  --host mixq.unified.oauth.senicity.com \
+  --port 443 \
+  --tls
+```
+
+TLS mode uses `ncat --ssl` when Ncat is installed. If Ncat is unavailable, the CLI automatically falls back to `openssl s_client` with certificate and hostname verification. The CLI displays the selected host, port, and transport during startup. Without `--tls`, the CLI continues to use the existing plain `nc` connection process.
+
+The TLS endpoint must be a raw TLS MixQL endpoint. It is not an HTTP/HTTPS API, so the CLI does not send HTTP requests.
 
 ### Agent Integration
 The MixQL CLI provides an interactive REPL interface that can be used by AI agents and automated systems. For detailed information on agent usage patterns, best practices, and examples, see [AGENTS.md](AGENTS.md).
