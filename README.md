@@ -33,7 +33,7 @@ By default, the CLI uses host ```localhost``` and port ```7272``` which are the 
 To change defaults on runtime, add `-h` for the hostname and `-p` for the port:
 
 ```bash
-bash mixql.sh -h mixq.unified.oauth.senicity.com -p 7272
+bash mixql.sh -h mixql.example.com -p 7272
 ```
 
 #### TLS connections
@@ -41,7 +41,7 @@ Plain TCP remains the default. To connect to a TLS-enabled NGINX stream endpoint
 
 ```bash
 bash mixql.sh \
-  --host mixq.unified.oauth.senicity.com \
+  --host mixql.example.com \
   --port 443 \
   --tls
 ```
